@@ -14,6 +14,8 @@ ENV	SERVICE_USER=myuser \
 	SERVICE_GROUP=mygroup \
 	SERVICE_GID=10001
 
+RUN apk add --no-cache libcap
+
 RUN	addgroup -g ${SERVICE_GID} ${SERVICE_GROUP} && \
 	adduser -g "${SERVICE_NAME} user" -D -H -G ${SERVICE_GROUP} -s /sbin/nologin -u ${SERVICE_UID} ${SERVICE_USER}
 
@@ -22,9 +24,11 @@ COPY --from=0 /app /app
 COPY images/ /images/
 
 RUN	chmod +x /app && \
+  setcap 'cap_net_bind_service=+ep' /app && \
 	chown -R ${SERVICE_USER}:${SERVICE_GROUP} /app /images
 
-USER ${SERVICE_USER}
+# USER ${SERVICE_USER}
+USER root
 
 ARG BUILD_DATE
 ARG BUILD_VERSION
@@ -40,5 +44,7 @@ LABEL org.label-schema.vendor="Weaveworks" \
   org.label-schema.vcs-ref="${COMMIT}" \
   org.label-schema.schema-version="1.0"
 
-CMD ["/app", "-port=8080"]
-EXPOSE 8080
+CMD ["/app", "-port=80"]
+EXPOSE 80
+
+#catalogue:inject-12-20-v5

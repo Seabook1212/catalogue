@@ -4,6 +4,7 @@ package catalogue
 // In our case we just use a REST-y HTTP transport.
 
 import (
+	"golang.org/x/net/context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -18,12 +19,12 @@ import (
 	stdopentracing "github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sony/gobreaker"
-	"golang.org/x/net/context"
 )
 
 // MakeHTTPHandler mounts the endpoints into a REST-y HTTP handler.
 func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger log.Logger, tracer stdopentracing.Tracer) *mux.Router {
 	r := mux.NewRouter().StrictSlash(false)
+
 	options := []httptransport.ServerOption{
 		httptransport.ServerErrorLogger(logger),
 		httptransport.ServerErrorEncoder(encodeError),
@@ -33,7 +34,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 	// GET /catalogue/size  Count
 	// GET /catalogue/{id}  Get
 	// GET /tags            Tags
-	// GET /health		Health Check
+	// GET /health          Health Check
 
 	r.Methods("GET").Path("/catalogue").Handler(httptransport.NewServer(
 		ctx,
@@ -45,6 +46,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 		encodeListResponse,
 		append(options, httptransport.ServerBefore(opentracing.FromHTTPRequest(tracer, "GET /catalogue", logger)))...,
 	))
+
 	r.Methods("GET").Path("/catalogue/size").Handler(httptransport.NewServer(
 		ctx,
 		circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
@@ -55,6 +57,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 		encodeResponse,
 		append(options, httptransport.ServerBefore(opentracing.FromHTTPRequest(tracer, "GET /catalogue/size", logger)))...,
 	))
+
 	r.Methods("GET").Path("/catalogue/{id}").Handler(httptransport.NewServer(
 		ctx,
 		circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
@@ -65,6 +68,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 		encodeGetResponse, // special case, this one can have an error
 		append(options, httptransport.ServerBefore(opentracing.FromHTTPRequest(tracer, "GET /catalogue/{id}", logger)))...,
 	))
+
 	r.Methods("GET").Path("/tags").Handler(httptransport.NewServer(
 		ctx,
 		circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
@@ -75,10 +79,12 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 		encodeResponse,
 		append(options, httptransport.ServerBefore(opentracing.FromHTTPRequest(tracer, "GET /tags", logger)))...,
 	))
+
 	r.Methods("GET").PathPrefix("/catalogue/images/").Handler(http.StripPrefix(
 		"/catalogue/images/",
 		http.FileServer(http.Dir(imagePath)),
 	))
+
 	r.Methods("GET").PathPrefix("/health").Handler(httptransport.NewServer(
 		ctx,
 		circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
@@ -89,6 +95,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 		encodeHealthResponse,
 		append(options, httptransport.ServerBefore(opentracing.FromHTTPRequest(tracer, "GET /health", logger)))...,
 	))
+
 	r.Handle("/metrics", promhttp.Handler())
 	return r
 }
@@ -99,9 +106,12 @@ func encodeError(_ context.Context, err error, w http.ResponseWriter) {
 	case ErrNotFound:
 		code = http.StatusNotFound
 	}
-	w.WriteHeader(code)
+
+	// 先写 Header 再 WriteHeader 更标准
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	w.WriteHeader(code)
+
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"error":       err.Error(),
 		"status_code": code,
 		"status_text": http.StatusText(code),
@@ -113,18 +123,22 @@ func decodeListRequest(_ context.Context, r *http.Request) (interface{}, error) 
 	if page := r.FormValue("page"); page != "" {
 		pageNum, _ = strconv.Atoi(page)
 	}
+
 	pageSize := 10
 	if size := r.FormValue("size"); size != "" {
 		pageSize, _ = strconv.Atoi(size)
 	}
+
 	order := "id"
 	if sort := r.FormValue("sort"); sort != "" {
 		order = strings.ToLower(sort)
 	}
+
 	tags := []string{}
 	if tagsval := r.FormValue("tags"); tagsval != "" {
 		tags = strings.Split(tagsval, ",")
 	}
+
 	return listRequest{
 		Tags:     tags,
 		Order:    order,
@@ -146,9 +160,7 @@ func decodeCountRequest(_ context.Context, r *http.Request) (interface{}, error)
 	if tagsval := r.FormValue("tags"); tagsval != "" {
 		tags = strings.Split(tagsval, ",")
 	}
-	return countRequest{
-		Tags: tags,
-	}, nil
+	return countRequest{Tags: tags}, nil
 }
 
 func decodeGetRequest(_ context.Context, r *http.Request) (interface{}, error) {
@@ -181,7 +193,6 @@ func encodeHealthResponse(ctx context.Context, w http.ResponseWriter, response i
 }
 
 func encodeResponse(_ context.Context, w http.ResponseWriter, response interface{}) error {
-	// All of our response objects are JSON serializable, so we just do that.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	return json.NewEncoder(w).Encode(response)
 }

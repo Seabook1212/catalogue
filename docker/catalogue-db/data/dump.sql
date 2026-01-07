@@ -80,3 +80,6 @@ INSERT INTO sock_tag VALUES ("837ab141-399e-4c1f-9abc-bace40296bac", "3");
 
 
 
+-- CREATE USER 'exporter'@'%' IDENTIFIED BY 'exporter_password';
+-- GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
+-- FLUSH PRIVILEGES;

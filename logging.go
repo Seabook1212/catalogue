@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/log"
+	"golang.org/x/net/context"
 )
 
 // LoggingMiddleware logs method calls, parameters, results, and elapsed time.
@@ -22,7 +23,7 @@ type loggingMiddleware struct {
 	logger log.Logger
 }
 
-func (mw loggingMiddleware) List(tags []string, order string, pageNum, pageSize int) (socks []Sock, err error) {
+func (mw loggingMiddleware) List(ctx context.Context, tags []string, order string, pageNum, pageSize int) (socks []Sock, err error) {
 	defer func(begin time.Time) {
 		mw.logger.Log(
 			"method", "List",
@@ -35,10 +36,10 @@ func (mw loggingMiddleware) List(tags []string, order string, pageNum, pageSize 
 			"took", time.Since(begin),
 		)
 	}(time.Now())
-	return mw.next.List(tags, order, pageNum, pageSize)
+	return mw.next.List(ctx, tags, order, pageNum, pageSize)
 }
 
-func (mw loggingMiddleware) Count(tags []string) (n int, err error) {
+func (mw loggingMiddleware) Count(ctx context.Context, tags []string) (n int, err error) {
 	defer func(begin time.Time) {
 		mw.logger.Log(
 			"method", "Count",
@@ -48,10 +49,10 @@ func (mw loggingMiddleware) Count(tags []string) (n int, err error) {
 			"took", time.Since(begin),
 		)
 	}(time.Now())
-	return mw.next.Count(tags)
+	return mw.next.Count(ctx, tags)
 }
 
-func (mw loggingMiddleware) Get(id string) (s Sock, err error) {
+func (mw loggingMiddleware) Get(ctx context.Context, id string) (s Sock, err error) {
 	defer func(begin time.Time) {
 		mw.logger.Log(
 			"method", "Get",
@@ -61,10 +62,10 @@ func (mw loggingMiddleware) Get(id string) (s Sock, err error) {
 			"took", time.Since(begin),
 		)
 	}(time.Now())
-	return mw.next.Get(id)
+	return mw.next.Get(ctx, id)
 }
 
-func (mw loggingMiddleware) Tags() (tags []string, err error) {
+func (mw loggingMiddleware) Tags(ctx context.Context) (tags []string, err error) {
 	defer func(begin time.Time) {
 		mw.logger.Log(
 			"method", "Tags",
@@ -73,10 +74,10 @@ func (mw loggingMiddleware) Tags() (tags []string, err error) {
 			"took", time.Since(begin),
 		)
 	}(time.Now())
-	return mw.next.Tags()
+	return mw.next.Tags(ctx)
 }
 
-func (mw loggingMiddleware) Health() (health []Health) {
+func (mw loggingMiddleware) Health(ctx context.Context) (health []Health) {
 	defer func(begin time.Time) {
 		mw.logger.Log(
 			"method", "Health",
@@ -84,5 +85,5 @@ func (mw loggingMiddleware) Health() (health []Health) {
 			"took", time.Since(begin),
 		)
 	}(time.Now())
-	return mw.next.Health()
+	return mw.next.Health(ctx)
 }

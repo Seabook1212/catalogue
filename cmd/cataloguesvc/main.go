@@ -1,10 +1,14 @@
 package main
 
 import (
+	"golang.org/x/net/context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -12,21 +16,15 @@ import (
 	stdopentracing "github.com/opentracing/opentracing-go"
 	zipkin "github.com/openzipkin/zipkin-go-opentracing"
 
-	"net"
-	"net/http"
-
-	"path/filepath"
-
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/microservices-demo/catalogue"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/weaveworks/common/middleware"
-	"golang.org/x/net/context"
 )
 
 const (
-	ServiceName = "catalogue"
+	ServiceName = "catalogue.sock-shop"
 )
 
 var (
@@ -56,7 +54,7 @@ func main() {
 	pwd, err := os.Getwd()
 	fmt.Fprintf(os.Stderr, "Getwd: %q (%v)\n", pwd, err)
 	files, _ := filepath.Glob(*images + "/*")
-	fmt.Fprintf(os.Stderr, "ls: %q\n", files) // contains a list of all files in the current directory
+	fmt.Fprintf(os.Stderr, "ls: %q\n", files)
 
 	// Mechanical stuff.
 	errc := make(chan error)
@@ -70,12 +68,13 @@ func main() {
 		logger = log.NewContext(logger).With("caller", log.DefaultCaller)
 	}
 
+	// Tracer domain.
 	var tracer stdopentracing.Tracer
 	{
 		if *zip == "" {
 			tracer = stdopentracing.NoopTracer{}
 		} else {
-			// Find service local IP.
+			// Find service local IP (for Zipkin recorder endpoint naming).
 			conn, err := net.Dial("udp", "8.8.8.8:80")
 			if err != nil {
 				logger.Log("err", err)
@@ -83,22 +82,28 @@ func main() {
 			}
 			localAddr := conn.LocalAddr().(*net.UDPAddr)
 			host := strings.Split(localAddr.String(), ":")[0]
-			defer conn.Close()
-			logger := log.NewContext(logger).With("tracer", "Zipkin")
-			logger.Log("addr", zip)
+			_ = conn.Close()
+
+			zlogger := log.NewContext(logger).With("tracer", "Zipkin")
+			zlogger.Log("addr", *zip)
+
 			collector, err := zipkin.NewHTTPCollector(
 				*zip,
-				zipkin.HTTPLogger(logger),
+				zipkin.HTTPLogger(zlogger),
 			)
 			if err != nil {
-				logger.Log("err", err)
+				zlogger.Log("err", err)
 				os.Exit(1)
 			}
+
+			// 注意：这里是 host:*port，而不是 host:port(pointer)
+			endpoint := fmt.Sprintf("%v:%v", host, *port)
+
 			tracer, err = zipkin.NewTracer(
-				zipkin.NewRecorder(collector, false, fmt.Sprintf("%v:%v", host, port), ServiceName),
+				zipkin.NewRecorder(collector, false, endpoint, ServiceName),
 			)
 			if err != nil {
-				logger.Log("err", err)
+				zlogger.Log("err", err)
 				os.Exit(1)
 			}
 		}
@@ -113,10 +118,13 @@ func main() {
 	}
 	defer db.Close()
 
-	// Check if DB connection can be made, only for logging purposes, should not fail/exit
-	err = db.Ping()
-	if err != nil {
-		logger.Log("Error", "Unable to connect to Database", "DSN", dsn)
+	// Optional: log connectivity (do not exit)
+	if err := db.Ping(); err != nil {
+		logger.Log(
+			"msg", "Unable to connect to Database",
+			"DSN", *dsn,
+			"err", err,
+		)
 	}
 
 	// Service domain.
@@ -129,7 +137,7 @@ func main() {
 	// Endpoint domain.
 	endpoints := catalogue.MakeEndpoints(service, tracer)
 
-	// HTTP router
+	// HTTP router.
 	router := catalogue.MakeHTTPHandler(ctx, endpoints, *images, logger, tracer)
 
 	httpMiddleware := []middleware.Interface{
@@ -139,7 +147,7 @@ func main() {
 		},
 	}
 
-	// Handler
+	// Handler.
 	handler := middleware.Merge(httpMiddleware...).Wrap(router)
 
 	// Create and launch the HTTP server.
@@ -150,7 +158,7 @@ func main() {
 
 	// Capture interrupts.
 	go func() {
-		c := make(chan os.Signal)
+		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 		errc <- fmt.Errorf("%s", <-c)
 	}()
