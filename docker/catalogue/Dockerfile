@@ -1,13 +1,18 @@
-FROM golang:1.7
+FROM golang:1.22-alpine AS builder
 
-COPY . /go/src/github.com/microservices-demo/catalogue
-WORKDIR /go/src/github.com/microservices-demo/catalogue
+WORKDIR /build
 
-RUN go get -u github.com/FiloSottile/gvt
-RUN gvt restore && \
-    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app github.com/microservices-demo/catalogue/cmd/cataloguesvc
+# Copy go.mod and go.sum first for better layer caching
+COPY go.mod go.sum ./
+RUN go mod download
 
-FROM alpine:3.4
+# Copy the rest of the source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=mod -a -installsuffix cgo -o /app github.com/microservices-demo/catalogue/cmd/cataloguesvc
+
+FROM alpine:3.19
 
 ENV	SERVICE_USER=myuser \
 	SERVICE_UID=10001 \
@@ -47,4 +52,4 @@ LABEL org.label-schema.vendor="Weaveworks" \
 CMD ["/app", "-port=80"]
 EXPOSE 80
 
-#catalogue:inject-12-20-v5
+#catalogue:inject-1-2-v2

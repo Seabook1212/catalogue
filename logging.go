@@ -1,11 +1,11 @@
 package catalogue
 
 import (
+	"context"
 	"strings"
 	"time"
 
 	"github.com/go-kit/kit/log"
-	"golang.org/x/net/context"
 )
 
 // LoggingMiddleware logs method calls, parameters, results, and elapsed time.

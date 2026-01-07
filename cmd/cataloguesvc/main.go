@@ -1,26 +1,22 @@
 package main
 
 import (
-	"golang.org/x/net/context"
+	"context"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/go-kit/kit/log"
 	stdopentracing "github.com/opentracing/opentracing-go"
-	zipkin "github.com/openzipkin/zipkin-go-opentracing"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/microservices-demo/catalogue"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/weaveworks/common/middleware"
 )
 
 const (
@@ -64,49 +60,19 @@ func main() {
 	var logger log.Logger
 	{
 		logger = log.NewLogfmtLogger(os.Stderr)
-		logger = log.NewContext(logger).With("ts", log.DefaultTimestampUTC)
-		logger = log.NewContext(logger).With("caller", log.DefaultCaller)
+		logger = log.With(logger, "ts", log.DefaultTimestampUTC)
+		logger = log.With(logger, "caller", log.DefaultCaller)
 	}
 
 	// Tracer domain.
 	var tracer stdopentracing.Tracer
 	{
-		if *zip == "" {
-			tracer = stdopentracing.NoopTracer{}
-		} else {
-			// Find service local IP (for Zipkin recorder endpoint naming).
-			conn, err := net.Dial("udp", "8.8.8.8:80")
-			if err != nil {
-				logger.Log("err", err)
-				os.Exit(1)
-			}
-			localAddr := conn.LocalAddr().(*net.UDPAddr)
-			host := strings.Split(localAddr.String(), ":")[0]
-			_ = conn.Close()
-
-			zlogger := log.NewContext(logger).With("tracer", "Zipkin")
-			zlogger.Log("addr", *zip)
-
-			collector, err := zipkin.NewHTTPCollector(
-				*zip,
-				zipkin.HTTPLogger(zlogger),
-			)
-			if err != nil {
-				zlogger.Log("err", err)
-				os.Exit(1)
-			}
-
-			// 注意：这里是 host:*port，而不是 host:port(pointer)
-			endpoint := fmt.Sprintf("%v:%v", host, *port)
-
-			tracer, err = zipkin.NewTracer(
-				zipkin.NewRecorder(collector, false, endpoint, ServiceName),
-			)
-			if err != nil {
-				zlogger.Log("err", err)
-				os.Exit(1)
-			}
+		// Zipkin integration temporarily disabled due to API changes
+		// To re-enable, update to use the new zipkin-go-opentracing v0.5.0 API
+		if *zip != "" {
+			logger.Log("warn", "Zipkin tracing is temporarily disabled - API migration needed")
 		}
+		tracer = stdopentracing.NoopTracer{}
 		stdopentracing.InitGlobalTracer(tracer)
 	}
 
@@ -140,15 +106,9 @@ func main() {
 	// HTTP router.
 	router := catalogue.MakeHTTPHandler(ctx, endpoints, *images, logger, tracer)
 
-	httpMiddleware := []middleware.Interface{
-		middleware.Instrument{
-			Duration:     HTTPLatency,
-			RouteMatcher: router,
-		},
-	}
-
-	// Handler.
-	handler := middleware.Merge(httpMiddleware...).Wrap(router)
+	// Handler - use router directly without weaveworks middleware
+	// The weaveworks middleware has compatibility issues with the newer versions
+	handler := router
 
 	// Create and launch the HTTP server.
 	go func() {

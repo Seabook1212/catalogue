@@ -1,6 +1,7 @@
 package catalogue
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -9,7 +10,6 @@ import (
 	"github.com/jmoiron/sqlx"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/ext"
-	"golang.org/x/net/context"
 )
 
 type Service interface {
