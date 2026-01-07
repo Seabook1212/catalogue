@@ -4,14 +4,21 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/go-kit/kit/log"
 	stdopentracing "github.com/opentracing/opentracing-go"
+	zipkinot "github.com/openzipkin-contrib/zipkin-go-opentracing"
+	"github.com/openzipkin/zipkin-go"
+	"github.com/openzipkin/zipkin-go/model"
+	zipkinhttp "github.com/openzipkin/zipkin-go/reporter/http"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -67,12 +74,51 @@ func main() {
 	// Tracer domain.
 	var tracer stdopentracing.Tracer
 	{
-		// Zipkin integration temporarily disabled due to API changes
-		// To re-enable, update to use the new zipkin-go-opentracing v0.5.0 API
-		if *zip != "" {
-			logger.Log("warn", "Zipkin tracing is temporarily disabled - API migration needed")
+		if *zip == "" {
+			tracer = stdopentracing.NoopTracer{}
+			logger.Log("info", "Zipkin tracing disabled - no ZIPKIN env var set")
+		} else {
+			zlogger := log.With(logger, "tracer", "Zipkin")
+			zlogger.Log("addr", *zip)
+
+			// Create HTTP reporter
+			reporter := zipkinhttp.NewReporter(*zip)
+
+			// Get local endpoint info
+			conn, err := net.Dial("udp", "8.8.8.8:80")
+			if err != nil {
+				logger.Log("err", err, "msg", "failed to get local IP")
+				tracer = stdopentracing.NoopTracer{}
+			} else {
+				localAddr := conn.LocalAddr().(*net.UDPAddr)
+				host := strings.Split(localAddr.String(), ":")[0]
+				_ = conn.Close()
+
+				hostPort := fmt.Sprintf("%v:%v", host, *port)
+
+				// Convert port string to uint16
+				portNum, _ := strconv.Atoi(*port)
+
+				// Create native Zipkin tracer
+				nativeTracer, err := zipkin.NewTracer(
+					reporter,
+					zipkin.WithLocalEndpoint(&model.Endpoint{
+						ServiceName: ServiceName,
+						IPv4:        net.ParseIP(host),
+						Port:        uint16(portNum),
+					}),
+				)
+				if err != nil {
+					zlogger.Log("err", err)
+					reporter.Close()
+					tracer = stdopentracing.NoopTracer{}
+				} else {
+					// Wrap native Zipkin tracer with OpenTracing bridge
+					tracer = zipkinot.Wrap(nativeTracer)
+					zlogger.Log("endpoint", hostPort, "msg", "Zipkin tracing enabled")
+				}
+			}
 		}
-		tracer = stdopentracing.NoopTracer{}
 		stdopentracing.InitGlobalTracer(tracer)
 	}
 
