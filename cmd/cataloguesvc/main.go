@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	ServiceName = "catalogue.sock-shop"
+	ServiceName = "catalogue"
 )
 
 var (

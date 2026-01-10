@@ -16,6 +16,7 @@ import (
 	httptransport "github.com/go-kit/kit/transport/http"
 	"github.com/gorilla/mux"
 	stdopentracing "github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go/ext"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sony/gobreaker"
 )
@@ -27,6 +28,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 	options := []httptransport.ServerOption{
 		httptransport.ServerErrorLogger(logger),
 		httptransport.ServerErrorEncoder(encodeError),
+		httptransport.ServerBefore(extractTracingContext(tracer)),
 	}
 
 	// GET /catalogue       List
@@ -189,4 +191,39 @@ func encodeHealthResponse(ctx context.Context, w http.ResponseWriter, response i
 func encodeResponse(_ context.Context, w http.ResponseWriter, response interface{}) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	return json.NewEncoder(w).Encode(response)
+}
+
+// extractTracingContext extracts OpenTracing span context from HTTP headers
+func extractTracingContext(tracer stdopentracing.Tracer) httptransport.RequestFunc {
+	return func(ctx context.Context, r *http.Request) context.Context {
+		// Skip tracing for health and metrics endpoints to reduce noise
+		if strings.HasPrefix(r.URL.Path, "/health") || strings.HasPrefix(r.URL.Path, "/metrics") {
+			return ctx
+		}
+
+		// Extract the span context from HTTP headers
+		spanContext, err := tracer.Extract(
+			stdopentracing.HTTPHeaders,
+			stdopentracing.HTTPHeadersCarrier(r.Header),
+		)
+
+		if err != nil && err != stdopentracing.ErrSpanContextNotFound {
+			// Log error but continue - don't break the request
+			return ctx
+		}
+
+		// If we found a span context, create a new span as a child of it
+		if spanContext != nil {
+			span := tracer.StartSpan(
+				r.Method+" "+r.URL.Path,
+				stdopentracing.ChildOf(spanContext),
+				ext.SpanKindRPCServer,
+			)
+			// The span will be finished by the endpoint middleware
+			// Store it in context for the endpoint to use
+			ctx = stdopentracing.ContextWithSpan(ctx, span)
+		}
+
+		return ctx
+	}
 }

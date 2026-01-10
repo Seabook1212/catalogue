@@ -208,13 +208,8 @@ func (s *catalogueService) Health(ctx context.Context) []Health {
 	var health []Health
 	dbstatus := "OK"
 
-	span := startDBSpan(ctx, "mysql PING catalogue-db", "PING")
-	defer span.Finish()
-
 	if err := s.db.Ping(); err != nil {
 		dbstatus = "err"
-		ext.Error.Set(span, true)
-		span.LogKV("event", "error", "message", err.Error())
 	}
 
 	app := Health{"catalogue", "OK", time.Now().String()}

@@ -78,12 +78,12 @@ func (mw loggingMiddleware) Tags(ctx context.Context) (tags []string, err error)
 }
 
 func (mw loggingMiddleware) Health(ctx context.Context) (health []Health) {
-	defer func(begin time.Time) {
-		mw.logger.Log(
-			"method", "Health",
-			"result", len(health),
-			"took", time.Since(begin),
-		)
-	}(time.Now())
+	// defer func(begin time.Time) {
+	// 	mw.logger.Log(
+	// 		"method", "Health",
+	// 		"result", len(health),
+	// 		"took", time.Since(begin),
+	// 	)
+	// }(time.Now())
 	return mw.next.Health(ctx)
 }
