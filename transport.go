@@ -77,10 +77,11 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 		options...,
 	))
 
-	r.Methods("GET").PathPrefix("/catalogue/images/").Handler(http.StripPrefix(
-		"/catalogue/images/",
-		http.FileServer(http.Dir(imagePath)),
-	))
+	// Wrap file server with tracing middleware
+	fileServer := http.StripPrefix("/catalogue/images/", http.FileServer(http.Dir(imagePath)))
+	r.Methods("GET").PathPrefix("/catalogue/images/").Handler(
+		wrapHandlerWithTracing(tracer, fileServer),
+	)
 
 	r.Methods("GET").PathPrefix("/health").Handler(httptransport.NewServer(
 		circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
@@ -193,7 +194,42 @@ func encodeResponse(_ context.Context, w http.ResponseWriter, response interface
 	return json.NewEncoder(w).Encode(response)
 }
 
-// extractTracingContext extracts OpenTracing span context from HTTP headers
+// wrapHandlerWithTracing wraps a standard http.Handler with OpenTracing support
+func wrapHandlerWithTracing(tracer stdopentracing.Tracer, handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extract the span context from HTTP headers
+		spanContext, err := tracer.Extract(
+			stdopentracing.HTTPHeaders,
+			stdopentracing.HTTPHeadersCarrier(r.Header),
+		)
+
+		var span stdopentracing.Span
+		if err != nil || spanContext == nil {
+			// No parent span, create a new root span
+			span = tracer.StartSpan(
+				r.Method + " " + r.URL.Path,
+				ext.SpanKindRPCServer,
+			)
+		} else {
+			// Create a child span
+			span = tracer.StartSpan(
+				r.Method+" "+r.URL.Path,
+				stdopentracing.ChildOf(spanContext),
+				ext.SpanKindRPCServer,
+			)
+		}
+		defer span.Finish()
+
+		// Add span to context
+		ctx := stdopentracing.ContextWithSpan(r.Context(), span)
+		r = r.WithContext(ctx)
+
+		// Call the actual handler
+		handler.ServeHTTP(w, r)
+	})
+}
+
+// extractTracingContext extracts OpenTraacing span context from HTTP headers
 func extractTracingContext(tracer stdopentracing.Tracer) httptransport.RequestFunc {
 	return func(ctx context.Context, r *http.Request) context.Context {
 		// Skip tracing for health and metrics endpoints to reduce noise
