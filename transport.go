@@ -207,7 +207,7 @@ func wrapHandlerWithTracing(tracer stdopentracing.Tracer, handler http.Handler) 
 		if err != nil || spanContext == nil {
 			// No parent span, create a new root span
 			span = tracer.StartSpan(
-				r.Method + " " + r.URL.Path,
+				r.Method+" "+r.URL.Path,
 				ext.SpanKindRPCServer,
 			)
 		} else {
@@ -218,6 +218,7 @@ func wrapHandlerWithTracing(tracer stdopentracing.Tracer, handler http.Handler) 
 				ext.SpanKindRPCServer,
 			)
 		}
+		span.SetTag("span.kind", string(ext.SpanKindRPCServerEnum))
 		defer span.Finish()
 
 		// Add span to context
@@ -255,6 +256,7 @@ func extractTracingContext(tracer stdopentracing.Tracer) httptransport.RequestFu
 				stdopentracing.ChildOf(spanContext),
 				ext.SpanKindRPCServer,
 			)
+			span.SetTag("span.kind", string(ext.SpanKindRPCServerEnum))
 			// The span will be finished by the endpoint middleware
 			// Store it in context for the endpoint to use
 			ctx = stdopentracing.ContextWithSpan(ctx, span)

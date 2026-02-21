@@ -55,14 +55,30 @@ type catalogueService struct {
 	logger log.Logger
 }
 
-func startDBSpan(ctx context.Context, operation, statement string) opentracing.Span {
-	span := opentracing.SpanFromContext(ctx)
-	if span == nil {
-		span = opentracing.StartSpan(operation)
-	} else {
-		span = opentracing.StartSpan(operation, opentracing.ChildOf(span.Context()))
+const defaultDBPeerService = "catalogue-db"
+
+func startOutboundSpan(ctx context.Context, operation, peerService string) opentracing.Span {
+	tags := opentracing.Tags{
+		string(ext.SpanKind): ext.SpanKindRPCClientEnum,
 	}
-	ext.SpanKindRPCClient.Set(span)
+	if peerService != "" {
+		tags[string(ext.PeerService)] = peerService
+	}
+
+	options := []opentracing.StartSpanOption{tags}
+	if parentSpan := opentracing.SpanFromContext(ctx); parentSpan != nil {
+		options = append(options, opentracing.ChildOf(parentSpan.Context()))
+	}
+
+	return opentracing.StartSpan(operation, options...)
+}
+
+func startDBSpan(ctx context.Context, operation, statement, peerService string) opentracing.Span {
+	if peerService == "" {
+		peerService = defaultDBPeerService
+	}
+
+	span := startOutboundSpan(ctx, operation, peerService)
 	span.SetTag("db.type", "mysql")
 	if statement != "" {
 		span.SetTag("db.statement", statement)
@@ -93,7 +109,7 @@ func (s *catalogueService) List(ctx context.Context, tags []string, order string
 	}
 	query += ";"
 
-	span := startDBSpan(ctx, "mysql SELECT catalogue list", query)
+	span := startDBSpan(ctx, "mysql SELECT catalogue list", query, defaultDBPeerService)
 	defer span.Finish()
 
 	err := s.db.Select(&socks, query, args...)
@@ -129,7 +145,7 @@ func (s *catalogueService) Count(ctx context.Context, tags []string) (int, error
 	}
 	query += ";"
 
-	span := startDBSpan(ctx, "mysql SELECT catalogue count", query)
+	span := startDBSpan(ctx, "mysql SELECT catalogue count", query, defaultDBPeerService)
 	defer span.Finish()
 
 	stmt, err := s.db.Prepare(query)
@@ -155,7 +171,7 @@ func (s *catalogueService) Count(ctx context.Context, tags []string) (int, error
 func (s *catalogueService) Get(ctx context.Context, id string) (Sock, error) {
 	query := baseQuery + " WHERE sock.sock_id =? GROUP BY sock.sock_id;"
 
-	span := startDBSpan(ctx, "mysql SELECT catalogue get", query)
+	span := startDBSpan(ctx, "mysql SELECT catalogue get", query, defaultDBPeerService)
 	span.SetTag("db.id", id)
 	defer span.Finish()
 
@@ -177,7 +193,7 @@ func (s *catalogueService) Get(ctx context.Context, id string) (Sock, error) {
 func (s *catalogueService) Tags(ctx context.Context) ([]string, error) {
 	query := "SELECT name FROM tag;"
 
-	span := startDBSpan(ctx, "mysql SELECT catalogue tags", query)
+	span := startDBSpan(ctx, "mysql SELECT catalogue tags", query, defaultDBPeerService)
 	defer span.Finish()
 
 	rows, err := s.db.Query(query)

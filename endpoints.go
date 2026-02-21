@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/go-kit/kit/endpoint"
-	"github.com/go-kit/kit/tracing/opentracing"
 	stdopentracing "github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go/ext"
 )
 
 type Endpoints struct {
@@ -18,11 +18,29 @@ type Endpoints struct {
 
 func MakeEndpoints(s Service, tracer stdopentracing.Tracer) Endpoints {
 	return Endpoints{
-		ListEndpoint:   opentracing.TraceServer(tracer, "GET /catalogue")(MakeListEndpoint(s)),
-		CountEndpoint:  opentracing.TraceServer(tracer, "GET /catalogue/size")(MakeCountEndpoint(s)),
-		GetEndpoint:    opentracing.TraceServer(tracer, "GET /catalogue/{id}")(MakeGetEndpoint(s)),
-		TagsEndpoint:   opentracing.TraceServer(tracer, "GET /tags")(MakeTagsEndpoint(s)),
+		ListEndpoint:   traceServerEndpoint(tracer, "GET /catalogue")(MakeListEndpoint(s)),
+		CountEndpoint:  traceServerEndpoint(tracer, "GET /catalogue/size")(MakeCountEndpoint(s)),
+		GetEndpoint:    traceServerEndpoint(tracer, "GET /catalogue/{id}")(MakeGetEndpoint(s)),
+		TagsEndpoint:   traceServerEndpoint(tracer, "GET /tags")(MakeTagsEndpoint(s)),
 		HealthEndpoint: MakeHealthEndpoint(s), // No tracing for health endpoint
+	}
+}
+
+func traceServerEndpoint(tracer stdopentracing.Tracer, operationName string) endpoint.Middleware {
+	return func(next endpoint.Endpoint) endpoint.Endpoint {
+		return func(ctx context.Context, request interface{}) (response interface{}, err error) {
+			if serverSpan := stdopentracing.SpanFromContext(ctx); serverSpan != nil {
+				// Request context extraction has already created a server span.
+				defer serverSpan.Finish()
+				return next(ctx, request)
+			}
+
+			span := tracer.StartSpan(operationName, ext.SpanKindRPCServer)
+			defer span.Finish()
+
+			ctx = stdopentracing.ContextWithSpan(ctx, span)
+			return next(ctx, request)
+		}
 	}
 }
 
