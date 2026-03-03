@@ -16,26 +16,27 @@ type Endpoints struct {
 	HealthEndpoint endpoint.Endpoint
 }
 
-func MakeEndpoints(s Service, tracer stdopentracing.Tracer) Endpoints {
+func MakeEndpoints(s Service, tracer stdopentracing.Tracer, traceTags TraceTags) Endpoints {
 	return Endpoints{
-		ListEndpoint:   traceServerEndpoint(tracer, "GET /catalogue")(MakeListEndpoint(s)),
-		CountEndpoint:  traceServerEndpoint(tracer, "GET /catalogue/size")(MakeCountEndpoint(s)),
-		GetEndpoint:    traceServerEndpoint(tracer, "GET /catalogue/{id}")(MakeGetEndpoint(s)),
-		TagsEndpoint:   traceServerEndpoint(tracer, "GET /tags")(MakeTagsEndpoint(s)),
+		ListEndpoint:   traceServerEndpoint(tracer, traceTags, "GET /catalogue")(MakeListEndpoint(s)),
+		CountEndpoint:  traceServerEndpoint(tracer, traceTags, "GET /catalogue/size")(MakeCountEndpoint(s)),
+		GetEndpoint:    traceServerEndpoint(tracer, traceTags, "GET /catalogue/{id}")(MakeGetEndpoint(s)),
+		TagsEndpoint:   traceServerEndpoint(tracer, traceTags, "GET /tags")(MakeTagsEndpoint(s)),
 		HealthEndpoint: MakeHealthEndpoint(s), // No tracing for health endpoint
 	}
 }
 
-func traceServerEndpoint(tracer stdopentracing.Tracer, operationName string) endpoint.Middleware {
+func traceServerEndpoint(tracer stdopentracing.Tracer, traceTags TraceTags, operationName string) endpoint.Middleware {
 	return func(next endpoint.Endpoint) endpoint.Endpoint {
 		return func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			if serverSpan := stdopentracing.SpanFromContext(ctx); serverSpan != nil {
-				// Request context extraction has already created a server span.
-				defer serverSpan.Finish()
+				traceTags.apply(serverSpan)
+				// HTTP server spans created by transport are finished by transport finalizers.
 				return next(ctx, request)
 			}
 
 			span := tracer.StartSpan(operationName, ext.SpanKindRPCServer)
+			traceTags.apply(span)
 			defer span.Finish()
 
 			ctx = stdopentracing.ContextWithSpan(ctx, span)

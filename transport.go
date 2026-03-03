@@ -6,6 +6,7 @@ package catalogue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/go-kit/kit/circuitbreaker"
 	"github.com/go-kit/kit/log"
+	kittransport "github.com/go-kit/kit/transport"
 	httptransport "github.com/go-kit/kit/transport/http"
 	"github.com/gorilla/mux"
 	stdopentracing "github.com/opentracing/opentracing-go"
@@ -21,14 +23,26 @@ import (
 	"github.com/sony/gobreaker"
 )
 
+type requestContextKey string
+
+const requestMetadataKey requestContextKey = "request-metadata"
+
+type requestMetadata struct {
+	method    string
+	target    string
+	startedAt time.Time
+}
+
 // MakeHTTPHandler mounts the endpoints into a REST-y HTTP handler.
-func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger log.Logger, tracer stdopentracing.Tracer) *mux.Router {
+func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger log.Logger, tracer stdopentracing.Tracer, traceTags TraceTags) *mux.Router {
 	r := mux.NewRouter().StrictSlash(false)
 
 	options := []httptransport.ServerOption{
-		httptransport.ServerErrorLogger(logger),
+		httptransport.ServerBefore(captureRequestMetadata()),
+		httptransport.ServerErrorHandler(newTransportErrorHandler(logger)),
 		httptransport.ServerErrorEncoder(encodeError),
-		httptransport.ServerBefore(extractTracingContext(tracer)),
+		httptransport.ServerBefore(extractTracingContext(tracer, traceTags)),
+		httptransport.ServerFinalizer(finalizeTracingSpan()),
 	}
 
 	// GET /catalogue       List
@@ -80,7 +94,7 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 	// Wrap file server with tracing middleware
 	fileServer := http.StripPrefix("/catalogue/images/", http.FileServer(http.Dir(imagePath)))
 	r.Methods("GET").PathPrefix("/catalogue/images/").Handler(
-		wrapHandlerWithTracing(tracer, fileServer),
+		wrapHandlerWithTracing(tracer, traceTags, fileServer),
 	)
 
 	r.Methods("GET").PathPrefix("/health").Handler(httptransport.NewServer(
@@ -99,8 +113,8 @@ func MakeHTTPHandler(ctx context.Context, e Endpoints, imagePath string, logger 
 
 func encodeError(_ context.Context, err error, w http.ResponseWriter) {
 	code := http.StatusInternalServerError
-	switch err {
-	case ErrNotFound:
+	switch {
+	case errors.Is(err, ErrNotFound):
 		code = http.StatusNotFound
 	}
 
@@ -194,8 +208,82 @@ func encodeResponse(_ context.Context, w http.ResponseWriter, response interface
 	return json.NewEncoder(w).Encode(response)
 }
 
+func captureRequestMetadata() httptransport.RequestFunc {
+	return func(ctx context.Context, r *http.Request) context.Context {
+		return context.WithValue(ctx, requestMetadataKey, requestMetadata{
+			method:    r.Method,
+			target:    r.URL.Path,
+			startedAt: time.Now(),
+		})
+	}
+}
+
+func requestMetadataFromContext(ctx context.Context) requestMetadata {
+	meta, ok := ctx.Value(requestMetadataKey).(requestMetadata)
+	if !ok {
+		return requestMetadata{}
+	}
+	return meta
+}
+
+func newTransportErrorHandler(logger log.Logger) kittransport.ErrorHandler {
+	return kittransport.ErrorHandlerFunc(func(ctx context.Context, err error) {
+		if err == nil {
+			return
+		}
+
+		if errors.Is(err, ErrNotFound) {
+			return
+		}
+
+		AnnotateSpanError(stdopentracing.SpanFromContext(ctx), classifyTransportError(err), err)
+		if errors.Is(err, ErrDBConnection) {
+			return
+		}
+
+		meta := requestMetadataFromContext(ctx)
+		args := append(TraceFieldsFromContext(ctx),
+			"service", catalogueServiceName,
+			"operation", meta.method,
+			"dependency", transportDependency(err),
+			"target", meta.target,
+			"error_type", classifyTransportError(err),
+			"error", err,
+			"latency_ms", time.Since(meta.startedAt).Milliseconds(),
+			"level", "error",
+		)
+		_ = logger.Log(args...)
+	})
+}
+
+func classifyTransportError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrDBConnection):
+		return "database"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, gobreaker.ErrOpenState), errors.Is(err, gobreaker.ErrTooManyRequests):
+		return "circuit_open"
+	default:
+		return classifyDependencyError(err)
+	}
+}
+
+func transportDependency(err error) string {
+	if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+		return "circuit_breaker"
+	}
+	return "http_server"
+}
+
 // wrapHandlerWithTracing wraps a standard http.Handler with OpenTracing support
-func wrapHandlerWithTracing(tracer stdopentracing.Tracer, handler http.Handler) http.Handler {
+func wrapHandlerWithTracing(tracer stdopentracing.Tracer, traceTags TraceTags, handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract the span context from HTTP headers
 		spanContext, err := tracer.Extract(
@@ -219,19 +307,25 @@ func wrapHandlerWithTracing(tracer stdopentracing.Tracer, handler http.Handler) 
 			)
 		}
 		span.SetTag("span.kind", string(ext.SpanKindRPCServerEnum))
+		span.SetTag("http.method", r.Method)
+		span.SetTag("http.url", r.URL.RequestURI())
+		traceTags.apply(span)
 		defer span.Finish()
+
+		rw := newStatusRecordingResponseWriter(w)
 
 		// Add span to context
 		ctx := stdopentracing.ContextWithSpan(r.Context(), span)
 		r = r.WithContext(ctx)
 
 		// Call the actual handler
-		handler.ServeHTTP(w, r)
+		handler.ServeHTTP(rw, r)
+		span.SetTag("http.status_code", rw.StatusCode())
 	})
 }
 
 // extractTracingContext extracts OpenTraacing span context from HTTP headers
-func extractTracingContext(tracer stdopentracing.Tracer) httptransport.RequestFunc {
+func extractTracingContext(tracer stdopentracing.Tracer, traceTags TraceTags) httptransport.RequestFunc {
 	return func(ctx context.Context, r *http.Request) context.Context {
 		// Skip tracing for health and metrics endpoints to reduce noise
 		if strings.HasPrefix(r.URL.Path, "/health") || strings.HasPrefix(r.URL.Path, "/metrics") {
@@ -244,24 +338,66 @@ func extractTracingContext(tracer stdopentracing.Tracer) httptransport.RequestFu
 			stdopentracing.HTTPHeadersCarrier(r.Header),
 		)
 
-		if err != nil && err != stdopentracing.ErrSpanContextNotFound {
-			// Log error but continue - don't break the request
-			return ctx
+		startOptions := []stdopentracing.StartSpanOption{ext.SpanKindRPCServer}
+		if err == nil && spanContext != nil {
+			startOptions = append(startOptions, stdopentracing.ChildOf(spanContext))
 		}
 
-		// If we found a span context, create a new span as a child of it
-		if spanContext != nil {
-			span := tracer.StartSpan(
-				r.Method+" "+r.URL.Path,
-				stdopentracing.ChildOf(spanContext),
-				ext.SpanKindRPCServer,
-			)
-			span.SetTag("span.kind", string(ext.SpanKindRPCServerEnum))
-			// The span will be finished by the endpoint middleware
-			// Store it in context for the endpoint to use
-			ctx = stdopentracing.ContextWithSpan(ctx, span)
-		}
+		span := tracer.StartSpan(r.Method+" "+r.URL.Path, startOptions...)
+		span.SetTag("span.kind", string(ext.SpanKindRPCServerEnum))
+		span.SetTag("http.method", r.Method)
+		span.SetTag("http.url", r.URL.RequestURI())
+		traceTags.apply(span)
+		// The span will be finished by the HTTP server finalizer.
+		// Store it in context for the endpoint to use
+		ctx = stdopentracing.ContextWithSpan(ctx, span)
 
 		return ctx
 	}
+}
+
+func finalizeTracingSpan() httptransport.ServerFinalizerFunc {
+	return func(ctx context.Context, code int, r *http.Request) {
+		span := stdopentracing.SpanFromContext(ctx)
+		if span == nil {
+			return
+		}
+
+		span.SetTag("http.method", r.Method)
+		span.SetTag("http.status_code", code)
+		if code >= http.StatusInternalServerError {
+			ext.Error.Set(span, true)
+		}
+		span.Finish()
+	}
+}
+
+type statusRecordingResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func newStatusRecordingResponseWriter(w http.ResponseWriter) *statusRecordingResponseWriter {
+	return &statusRecordingResponseWriter{
+		ResponseWriter: w,
+		statusCode:     http.StatusOK,
+	}
+}
+
+func (w *statusRecordingResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusRecordingResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusRecordingResponseWriter) StatusCode() int {
+	return w.statusCode
 }

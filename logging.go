@@ -2,13 +2,10 @@ package catalogue
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/go-kit/kit/log"
-	"github.com/opentracing/opentracing-go"
-	zipkinot "github.com/openzipkin-contrib/zipkin-go-opentracing"
 )
 
 // LoggingMiddleware logs method calls, parameters, results, and elapsed time.
@@ -26,58 +23,22 @@ type loggingMiddleware struct {
 	logger log.Logger
 }
 
-// extractTraceInfo extracts trace ID and span ID from context
-func extractTraceInfo(ctx context.Context) (traceID, spanID string) {
-	span := opentracing.SpanFromContext(ctx)
-	if span == nil {
-		return "", ""
-	}
-
-	spanContext := span.Context()
-
-	// Try to extract Zipkin span context
-	if zipkinSpanContext, ok := spanContext.(zipkinot.SpanContext); ok {
-		// Get the native Zipkin span context
-		// For Zipkin, use only the Low part of TraceID (64-bit) to match Jaeger format
-		// SpanID is also a uint64 value
-		traceID := fmt.Sprintf("%016x", zipkinSpanContext.TraceID.Low)
-		spanID := fmt.Sprintf("%016x", uint64(zipkinSpanContext.ID))
-		return traceID, spanID
-	}
-
-	// Fallback: try string conversion
-	traceIDStr := fmt.Sprintf("%v", spanContext)
-	return traceIDStr, ""
-}
-
-// logWithTrace adds trace context to logger
 func (mw loggingMiddleware) logWithTrace(ctx context.Context, keyvals ...interface{}) {
-	traceID, spanID := extractTraceInfo(ctx)
-
-	// Build log args with trace context
-	args := make([]interface{}, 0, len(keyvals)+4)
-	if traceID != "" {
-		args = append(args, "traceid", traceID)
-	}
-	if spanID != "" {
-		args = append(args, "spanid", spanID)
-	}
-	args = append(args, keyvals...)
-
-	mw.logger.Log(args...)
+	args := append(TraceFieldsFromContext(ctx), keyvals...)
+	_ = mw.logger.Log(args...)
 }
 
 func (mw loggingMiddleware) List(ctx context.Context, tags []string, order string, pageNum, pageSize int) (socks []Sock, err error) {
 	defer func(begin time.Time) {
 		mw.logWithTrace(ctx,
-			"method", "List",
+			"operation", "List",
 			"tags", strings.Join(tags, ", "),
 			"order", order,
-			"pageNum", pageNum,
-			"pageSize", pageSize,
-			"result", len(socks),
-			"err", err,
-			"took", time.Since(begin),
+			"page_num", pageNum,
+			"page_size", pageSize,
+			"result_count", len(socks),
+			"latency_ms", time.Since(begin).Milliseconds(),
+			"level", "info",
 		)
 	}(time.Now())
 	return mw.next.List(ctx, tags, order, pageNum, pageSize)
@@ -86,11 +47,11 @@ func (mw loggingMiddleware) List(ctx context.Context, tags []string, order strin
 func (mw loggingMiddleware) Count(ctx context.Context, tags []string) (n int, err error) {
 	defer func(begin time.Time) {
 		mw.logWithTrace(ctx,
-			"method", "Count",
+			"operation", "Count",
 			"tags", strings.Join(tags, ", "),
-			"result", n,
-			"err", err,
-			"took", time.Since(begin),
+			"result_count", n,
+			"latency_ms", time.Since(begin).Milliseconds(),
+			"level", "info",
 		)
 	}(time.Now())
 	return mw.next.Count(ctx, tags)
@@ -99,11 +60,11 @@ func (mw loggingMiddleware) Count(ctx context.Context, tags []string) (n int, er
 func (mw loggingMiddleware) Get(ctx context.Context, id string) (s Sock, err error) {
 	defer func(begin time.Time) {
 		mw.logWithTrace(ctx,
-			"method", "Get",
+			"operation", "Get",
 			"id", id,
-			"sock", s.ID,
-			"err", err,
-			"took", time.Since(begin),
+			"sock_id", s.ID,
+			"latency_ms", time.Since(begin).Milliseconds(),
+			"level", "info",
 		)
 	}(time.Now())
 	return mw.next.Get(ctx, id)
@@ -112,10 +73,10 @@ func (mw loggingMiddleware) Get(ctx context.Context, id string) (s Sock, err err
 func (mw loggingMiddleware) Tags(ctx context.Context) (tags []string, err error) {
 	defer func(begin time.Time) {
 		mw.logWithTrace(ctx,
-			"method", "Tags",
-			"result", len(tags),
-			"err", err,
-			"took", time.Since(begin),
+			"operation", "Tags",
+			"result_count", len(tags),
+			"latency_ms", time.Since(begin).Milliseconds(),
+			"level", "info",
 		)
 	}(time.Now())
 	return mw.next.Tags(ctx)
